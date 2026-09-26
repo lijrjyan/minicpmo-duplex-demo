@@ -47,6 +47,9 @@ class PlaybackProcessor extends AudioWorkletProcessor {
     super();
     const config = options.processorOptions || {};
     this.initialSamples = config.initialSamples || Math.round(sampleRate * 0.3);
+    this.maxSamples = config.maxSamples || Math.round(sampleRate * 2.5);
+    this.keepSamples = config.keepSamples || Math.round(sampleRate * 1.5);
+    this.dropped = 0;
     this.queue = [];
     this.headOffset = 0;
     this.queuedSamples = 0;
@@ -66,6 +69,12 @@ class PlaybackProcessor extends AudioWorkletProcessor {
       if (data.type === "push" && data.samples) {
         this.queue.push(data.samples);
         this.queuedSamples += data.samples.length;
+        // A network stall lets audio pile up while the server keeps generating in
+        // real time; without a cap the backlog never shrinks and playback drifts
+        // behind the transcript. Skip ahead by dropping the oldest samples.
+        if (this.queuedSamples > this.maxSamples) this.trim(this.keepSamples);
+      } else if (data.type === "trim") {
+        this.trim(data.keepSamples || 0);
       } else if (data.type === "open") {
         this.responseOpen = true;
       } else if (data.type === "clear") {
@@ -88,6 +97,25 @@ class PlaybackProcessor extends AudioWorkletProcessor {
         this.playedSamples = 0;
       }
     };
+  }
+
+  trim(keepSamples) {
+    while (this.queuedSamples > keepSamples && this.queue.length) {
+      const chunk = this.queue[0];
+      const remaining = chunk.length - this.headOffset;
+      const excess = this.queuedSamples - keepSamples;
+      if (remaining <= excess) {
+        this.queue.shift();
+        this.headOffset = 0;
+        this.queuedSamples -= remaining;
+        this.dropped += remaining;
+      } else {
+        this.headOffset += excess;
+        this.queuedSamples -= excess;
+        this.dropped += excess;
+      }
+    }
+    this.fadeRemaining = this.fadeLength;
   }
 
   takeSample() {
@@ -129,6 +157,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
       this.statusCountdown = Math.round(sampleRate / 10);
       this.port.postMessage({
         type: "status",
+        droppedMs: Math.round((this.dropped / sampleRate) * 1000),
         queueMs: this.queuedSamples / sampleRate * 1000,
         playedMs: this.playedSamples / sampleRate * 1000,
         buffering: !this.started,

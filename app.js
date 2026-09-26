@@ -168,6 +168,8 @@ function sessionListeners() {
     },
     response: ({ open }) => {
       if (playbackNode) playbackNode.port.postMessage({ type: open ? "open" : "flush" });
+      // A new answer means whatever is still queued belongs to the previous one.
+      if (open && playbackNode) playbackNode.port.postMessage({ type: "trim", keepSamples: Math.round(playbackContext.sampleRate * 0.5) });
       if (transcriptStarted) ui.transcript.textContent = session.transcript;
     },
     text: () => {
@@ -178,7 +180,11 @@ function sessionListeners() {
       }
       ui.transcript.textContent = session.transcript;
     },
-    unit: () => {},
+    unit: (unit) => {
+      // The model stopped talking (a unit without audio): what is still queued was
+      // generated before that decision, keep at most one unit of it.
+      if (unit && unit.decision === "listen" && playbackNode) playbackNode.port.postMessage({ type: "trim", keepSamples: Math.round(playbackContext.sampleRate * 1.0) });
+    },
     drained: () => {},
     warning: warn,
   };
