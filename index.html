@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MiniCPM-o full-duplex demo</title>
+  <link rel="icon" href="data:,">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07111f;
+      --surface: #101d2f;
+      --surface-2: #17263a;
+      --border: #2b3b51;
+      --text: #f1f5f9;
+      --muted: #9fb0c4;
+      --accent: #5eead4;
+      --user: #93c5fd;
+      --danger: #fda4af;
+      --warning: #fcd34d;
+      --focus: #93c5fd;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100dvh; background: var(--bg); color: var(--text); }
+    main { width: min(760px, calc(100% - 32px)); margin: 0 auto; padding: 32px 0 56px; }
+    h1 { margin: 0 0 12px; font-size: clamp(1.35rem, 3.6vw, 1.9rem); letter-spacing: -0.02em; }
+    p.note { margin: 0 0 20px; color: var(--muted); line-height: 1.6; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 18px; margin-bottom: 16px; }
+    .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
+    .status { font: 600 .9rem ui-monospace, SFMono-Regular, Consolas, monospace; padding: 7px 12px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+    .status[data-state="connected"], .status[data-state="listening"] { color: var(--accent); border-color: #27716b; background: #0b2b2c; }
+    .status[data-state="speaking"] { color: #042523; background: var(--accent); border-color: var(--accent); }
+    .status[data-state="busy"] { color: var(--warning); border-color: #7c6420; background: #2d260d; }
+    .status[data-state="error"] { color: var(--danger); border-color: #7f3340; background: #35151e; }
+    .talk { display: flex; gap: 14px; font-size: .85rem; color: var(--muted); }
+    .talk span { display: inline-flex; align-items: center; gap: 6px; }
+    .dot { width: 11px; height: 11px; border-radius: 50%; background: #334155; transition: background 120ms linear; }
+    #youDot[data-on="true"] { background: var(--user); }
+    #modelDot[data-on="true"] { background: var(--accent); }
+    .controls { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+    button { min-height: 44px; padding: 0 18px; border: 1px solid var(--border); border-radius: 9px; color: var(--text); background: var(--surface-2); font: 650 .9rem inherit; cursor: pointer; touch-action: manipulation; }
+    button:hover:not(:disabled) { background: #20344d; border-color: #48617e; }
+    button.primary { color: #042523; background: var(--accent); border-color: var(--accent); }
+    button.danger { color: var(--danger); border-color: #713342; }
+    button:disabled { opacity: .42; cursor: not-allowed; }
+    button:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+    #warnings { min-height: 22px; margin: 12px 0 0; color: var(--warning); font-size: .88rem; }
+    #timer { color: var(--muted); font: .82rem ui-monospace, monospace; }
+    h2 { margin: 0 0 10px; font-size: .95rem; }
+    .transcript { min-height: 200px; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .9rem/1.6 ui-sans-serif, system-ui, sans-serif; color: #dbeafe; }
+    .empty { color: #72849a; }
+    @media (max-width: 430px) { main { width: calc(100% - 32px); padding-top: 20px; } .controls button { flex: 1 1 calc(50% - 10px); } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>MiniCPM-o 4.5 full-duplex demo (sglang-omni)</h1>
+    <p class="note">Talk to MiniCPM-o 4.5 in native full duplex: it listens and speaks at the same time, and you can interrupt it just by talking. Only one person can use the demo at a time, and each session is capped at 10 minutes. Please use headphones so the model does not hear itself, use Chrome, and speak English.</p>
+
+    <section class="card" aria-label="Session">
+      <div class="row">
+        <div id="connectionState" class="status" data-state="disconnected" role="status" aria-live="polite">disconnected</div>
+        <div class="talk" aria-label="Who is talking">
+          <span><i id="youDot" class="dot" data-on="false"></i>you</span>
+          <span><i id="modelDot" class="dot" data-on="false"></i>model</span>
+          <span id="timer"></span>
+        </div>
+      </div>
+      <div class="controls" aria-label="Session controls">
+        <button id="connectBtn" class="primary" type="button">Connect</button>
+        <button id="startMicBtn" type="button" disabled>Start mic</button>
+        <button id="stopMicBtn" type="button" disabled>Stop</button>
+        <button id="closeBtn" class="danger" type="button" disabled>End</button>
+      </div>
+      <div id="warnings" role="alert" aria-live="polite"></div>
+    </section>
+
+    <section class="card" aria-labelledby="transcriptHeading">
+      <h2 id="transcriptHeading">Transcript (model)</h2>
+      <div id="transcript" class="transcript empty" aria-live="polite">What the model says will appear here.</div>
+    </section>
+  </main>
+  <script src="config.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
