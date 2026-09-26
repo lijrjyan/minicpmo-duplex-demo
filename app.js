@@ -214,6 +214,7 @@ async function connect() {
       transport: (event) => activeSocket.send(JSON.stringify(event)),
       now: () => performance.now(),
       outputModalities: ["audio"],
+      instructions: window.DEMO_INSTRUCTIONS || "",
       listeners: sessionListeners(),
     });
     session = activeSession;
