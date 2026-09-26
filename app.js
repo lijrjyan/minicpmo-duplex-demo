@@ -8,7 +8,7 @@ const SESSION_CAP_S = 600;
 const MIC_TALK_RMS = 0.02;
 const MODEL_TALK_RMS = 0.005;
 
-const ids = ["connectBtn", "startMicBtn", "stopMicBtn", "closeBtn", "connectionState", "warnings", "transcript", "youDot", "modelDot", "timer"];
+const ids = ["connectBtn", "startMicBtn", "stopMicBtn", "interruptBtn", "closeBtn", "connectionState", "warnings", "transcript", "youDot", "modelDot", "timer"];
 const ui = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
 
 function wsUrl() {
@@ -61,7 +61,10 @@ function inputActive() {
   return Boolean(captureStream);
 }
 
+let mutedResponse = false;
+
 function setButtons() {
+  ui.interruptBtn.disabled = !(session && session.responseOpen) || mutedResponse;
   ui.connectBtn.disabled = isOpen() || connecting || (!socket && (remoteBusy || !serverUp));
   ui.startMicBtn.disabled = !isReady() || inputActive() || startingMic;
   ui.stopMicBtn.disabled = !inputActive();
@@ -163,10 +166,15 @@ function sessionListeners() {
     },
     audio: (bytes) => {
       if (!playbackNode) return;
+      // After a local interrupt, drop the rest of that answer; the next
+      // response.created lifts the mute.
+      if (mutedResponse) return;
       const samples = pcm16ToFloat(bytes, session.outputRate, playbackContext.sampleRate);
       playbackNode.port.postMessage({ type: "push", samples }, [samples.buffer]);
     },
     response: ({ open }) => {
+      if (open) mutedResponse = false;
+      setButtons();
       if (playbackNode) playbackNode.port.postMessage({ type: open ? "open" : "flush" });
       // A new answer means whatever is still queued belongs to the previous one.
       if (open && playbackNode) playbackNode.port.postMessage({ type: "trim", keepSamples: Math.round(playbackContext.sampleRate * 0.5) });
@@ -330,6 +338,11 @@ async function closeNow() {
 ui.connectBtn.addEventListener("click", () => connect().catch((error) => warn(error.message)));
 ui.startMicBtn.addEventListener("click", () => startMic().catch((error) => warn(`Microphone: ${error.message}`)));
 ui.stopMicBtn.addEventListener("click", () => stopInput().catch((error) => warn(error.message)));
+ui.interruptBtn.addEventListener("click", () => {
+  mutedResponse = true;
+  if (playbackNode) playbackNode.port.postMessage({ type: "clear" });
+  setButtons();
+});
 ui.closeBtn.addEventListener("click", () => closeNow().catch((error) => warn(error.message)));
 window.addEventListener("beforeunload", () => { if (session && isOpen()) session.close(); });
 setInterval(tick, 100);
