@@ -1,6 +1,8 @@
 // Lite public page for a native full-duplex /v1/realtime session behind the demo gate.
-// Protocol handling lives in session.js and audio I/O in worklet.js (both unchanged).
+// Protocol handling lives in session.js, audio I/O in worklet.js and camera capture
+// in camera.js (all shared byte-for-byte with tools/realtime_web_demo).
 import { DuplexSession, INPUT_RATE, PACKET_SAMPLES } from "./session.js";
+import { Camera } from "./camera.js";
 
 const JITTER_MS = 300;
 const STATUS_POLL_MS = 5000;
@@ -8,7 +10,7 @@ const SESSION_CAP_S = 600;
 const MIC_TALK_RMS = 0.02;
 const MODEL_TALK_RMS = 0.005;
 
-const ids = ["connectBtn", "startMicBtn", "stopMicBtn", "interruptBtn", "closeBtn", "connectionState", "warnings", "transcript", "youDot", "modelDot", "timer"];
+const ids = ["connectBtn", "startMicBtn", "stopMicBtn", "interruptBtn", "closeBtn", "connectionState", "warnings", "transcript", "youDot", "modelDot", "timer", "cameraBtn", "cameraPreview", "frameCount"];
 const ui = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
 
 function wsUrl() {
@@ -43,6 +45,11 @@ let lastCloseCode = null;
 let sessionStart = null;
 let micHot = 0;
 let modelHot = 0;
+// The camera is offered only when the server declares image input in
+// session.updated; window.DEMO_CAMERA = false hides it even then.
+const OFFER_CAMERA = window.DEMO_CAMERA !== false;
+const camera = new Camera(ui.cameraPreview);
+let startingCamera = false;
 
 function setState(label, state) {
   ui.connectionState.textContent = label;
@@ -69,6 +76,44 @@ function setButtons() {
   ui.startMicBtn.disabled = !isReady() || inputActive() || startingMic;
   ui.stopMicBtn.disabled = !inputActive();
   ui.closeBtn.disabled = !isOpen();
+  const offerCamera = OFFER_CAMERA && Boolean(session && session.imageGranted && isReady());
+  ui.cameraBtn.hidden = !offerCamera;
+  ui.cameraBtn.disabled = !offerCamera || startingCamera;
+  ui.cameraBtn.textContent = camera.active ? "Camera off" : "Camera";
+  ui.cameraPreview.hidden = !camera.active;
+  ui.frameCount.hidden = !camera.active;
+}
+
+function renderFrames() {
+  if (!session) return;
+  const { sent, accepted, rejected } = session.frameStats;
+  ui.frameCount.textContent = `frames sent / accepted: ${sent} / ${accepted}${rejected ? ` (${rejected} rejected)` : ""}`;
+}
+
+async function startCamera() {
+  if (startingCamera || camera.active || !session || !session.imageGranted) return;
+  startingCamera = true;
+  const activeSession = session;
+  setButtons();
+  try {
+    await camera.start();
+    if (session !== activeSession || !isReady()) {
+      camera.stop();
+      return;
+    }
+    const params = activeSession.image;
+    activeSession.setFrameSource(() => camera.grab(params));
+    renderFrames();
+  } finally {
+    startingCamera = false;
+    setButtons();
+  }
+}
+
+function stopCamera() {
+  if (session) session.setFrameSource(null);
+  camera.stop();
+  setButtons();
 }
 
 // Status line: connected / listening / speaking while in a session, busy / disconnected otherwise.
@@ -154,6 +199,7 @@ function pcm16ToFloat(bytes, sourceRate, targetRate) {
 function sessionListeners() {
   return {
     state: (state) => {
+      if (state !== "ready") stopCamera();
       if (state === "closed" || state === "error") stopInput();
       setButtons();
       refreshState();
@@ -194,6 +240,8 @@ function sessionListeners() {
       if (unit && unit.decision === "listen" && playbackNode) playbackNode.port.postMessage({ type: "trim", keepSamples: Math.round(playbackContext.sampleRate * 1.0) });
     },
     drained: () => {},
+    image: () => setButtons(),
+    frame: renderFrames,
     warning: warn,
   };
 }
@@ -203,6 +251,7 @@ async function connect() {
   if (!window.DEMO_WS_URL) throw new Error("This page is not configured with a server address.");
   connecting = true;
   await stopInput();
+  stopCamera();
   transcriptStarted = false;
   lastCloseCode = null;
   sessionStart = null;
@@ -250,6 +299,7 @@ async function connect() {
       connecting = false;
       socket = null;
       await stopInput();
+      stopCamera();
       if (CLOSE_MESSAGES[event.code]) warn(CLOSE_MESSAGES[event.code]);
       if (event.code === 4429) remoteBusy = true;
       if (playbackNode) playbackNode.port.postMessage({ type: "reset" });
@@ -319,6 +369,8 @@ async function startMic() {
 
 async function stopInput() {
   micGeneration += 1;
+  // Frames ride on the microphone clock; drop any grab still in flight.
+  if (session) session.stopFrames();
   if (captureStream) captureStream.getTracks().forEach((track) => track.stop());
   captureStream = null;
   captureNode = null;
@@ -330,6 +382,7 @@ async function stopInput() {
 
 async function closeNow() {
   await stopInput();
+  stopCamera();
   if (playbackNode) playbackNode.port.postMessage({ type: "clear" });
   if (session && isOpen()) session.close();
   setButtons();
@@ -338,6 +391,7 @@ async function closeNow() {
 ui.connectBtn.addEventListener("click", () => connect().catch((error) => warn(error.message)));
 ui.startMicBtn.addEventListener("click", () => startMic().catch((error) => warn(`Microphone: ${error.message}`)));
 ui.stopMicBtn.addEventListener("click", () => stopInput().catch((error) => warn(error.message)));
+ui.cameraBtn.addEventListener("click", () => (camera.active ? stopCamera() : startCamera().catch((error) => warn(`Camera: ${error.message}`))));
 ui.interruptBtn.addEventListener("click", () => {
   mutedResponse = true;
   if (playbackNode) playbackNode.port.postMessage({ type: "clear" });

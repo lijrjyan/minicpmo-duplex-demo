@@ -45,6 +45,10 @@
     button.danger { color: var(--danger); border-color: #713342; }
     button:disabled { opacity: .42; cursor: not-allowed; }
     button:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+    .camera { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 12px; color: var(--muted); font: .82rem ui-monospace, monospace; }
+    #cameraPreview { width: 160px; max-width: 100%; aspect-ratio: 4 / 3; border-radius: 8px; border: 1px solid var(--border); background: #091421; object-fit: cover; }
+    [hidden] { display: none !important; }
+    .camera:not(:has(> :not([hidden]))) { display: none; }
     #warnings { min-height: 22px; margin: 12px 0 0; color: var(--warning); font-size: .88rem; }
     #timer { color: var(--muted); font: .82rem ui-monospace, monospace; }
     h2 { margin: 0 0 10px; font-size: .95rem; }
@@ -70,9 +74,14 @@
       <div class="controls" aria-label="Session controls">
         <button id="connectBtn" class="primary" type="button">Connect</button>
         <button id="startMicBtn" type="button" disabled>Start mic</button>
+        <button id="cameraBtn" type="button" hidden disabled title="Send one camera frame per second while the mic is on">Camera</button>
         <button id="stopMicBtn" type="button" disabled>Stop mic</button>
         <button id="interruptBtn" type="button" disabled title="Mute the current answer right away (the model itself yields only to a full sentence, about 2 s later)">Interrupt</button>
         <button id="closeBtn" class="danger" type="button" disabled>End</button>
+      </div>
+      <div class="camera" aria-label="Camera">
+        <video id="cameraPreview" muted playsinline autoplay hidden aria-label="Camera preview"></video>
+        <span id="frameCount" hidden role="status"></span>
       </div>
       <div id="warnings" role="alert" aria-live="polite"></div>
     </section>
