@@ -50,6 +50,14 @@ class PlaybackProcessor extends AudioWorkletProcessor {
     this.maxSamples = config.maxSamples || Math.round(sampleRate * 2.5);
     this.keepSamples = config.keepSamples || Math.round(sampleRate * 1.5);
     this.dropped = 0;
+    this.rate = 1;
+    this.frameLen = Math.round(sampleRate * 0.02);
+    this.hopOut = Math.round(sampleRate * 0.01);
+    this.hopIn = this.hopOut;
+    this.tolerance = Math.round(sampleRate * 0.006);
+    this.stretch = null;
+    this.outBuf = [];
+    this.outPos = 0;
     this.queue = [];
     this.headOffset = 0;
     this.queuedSamples = 0;
@@ -83,6 +91,10 @@ class PlaybackProcessor extends AudioWorkletProcessor {
         this.queuedSamples = 0;
         this.started = false;
         this.fadeRemaining = this.fadeLength;
+        this.stretch = null;
+        this.rate = 1;
+        this.outBuf = [];
+        this.outPos = 0;
       } else if (data.type === "flush") {
         this.responseOpen = false;
         if (this.queuedSamples > 0) this.started = true;
@@ -95,6 +107,10 @@ class PlaybackProcessor extends AudioWorkletProcessor {
         this.started = false;
         this.fadeRemaining = this.fadeLength;
         this.playedSamples = 0;
+        this.stretch = null;
+        this.rate = 1;
+        this.outBuf = [];
+        this.outPos = 0;
       }
     };
   }
@@ -116,18 +132,138 @@ class PlaybackProcessor extends AudioWorkletProcessor {
       }
     }
     this.fadeRemaining = this.fadeLength;
+    this.stretch = null;
+  }
+
+  // --- catch-up: accelerate (WSOLA time-stretch, pitch preserved) or skip ---
+  // Backlog beyond the jitter target is played faster; a large backlog is
+  // skipped outright because seconds-old speech is stale in a duplex talk.
+  catchUpRate() {
+    const backlog = (this.queuedSamples - this.initialSamples) / sampleRate;
+    if (backlog > 1.5) {
+      this.trim(this.initialSamples + Math.round(sampleRate * 1.0));
+      return 1.25;
+    } else if (backlog > 0.7) return 1.25;
+    else if (backlog > 0.2) return 1.12;
+    else if (this.rate > 1 && backlog > 0.1) return this.rate;
+    else return 1;
+  }
+
+  peek(count) {
+    if (this.queuedSamples < count) return null;
+    const view = new Float32Array(count);
+    let filled = 0;
+    let offset = this.headOffset;
+    for (let index = 0; index < this.queue.length && filled < count; index += 1) {
+      const chunk = this.queue[index];
+      const take = Math.min(chunk.length - offset, count - filled);
+      view.set(chunk.subarray(offset, offset + take), filled);
+      filled += take;
+      offset = 0;
+    }
+    return view;
+  }
+
+  consume(count) {
+    let left = count;
+    while (left > 0 && this.queue.length) {
+      const chunk = this.queue[0];
+      const remaining = chunk.length - this.headOffset;
+      if (remaining <= left) {
+        this.queue.shift();
+        this.headOffset = 0;
+        left -= remaining;
+        this.queuedSamples -= remaining;
+      } else {
+        this.headOffset += left;
+        this.queuedSamples -= left;
+        left = 0;
+      }
+    }
+  }
+
+  fill(count) {
+    while (this.outBuf.length - this.outPos < count) {
+      const rate = this.catchUpRate();
+      if (rate !== this.rate) this.enterRate(rate);
+      if (this.rate === 1) {
+        const need = count - (this.outBuf.length - this.outPos);
+        const take = Math.min(need, this.queuedSamples);
+        if (take <= 0) return;
+        const view = this.peek(take);
+        for (let index = 0; index < take; index += 1) this.outBuf.push(view[index]);
+        this.consume(take);
+      } else if (!this.stretchFrame()) return;
+    }
+  }
+
+  enterRate(rate) {
+    if (this.rate > 1 && this.stretch) {
+      // Leave stretch mode at the natural continuation of the last frame.
+      this.consume(Math.min(this.queuedSamples, this.stretch.prevStart + this.hopOut));
+      this.stretch = null;
+    }
+    this.rate = rate;
+    this.hopIn = Math.round(this.hopOut * rate);
+  }
+
+  stretchFrame() {
+    const N = this.frameLen;
+    const Hs = this.hopOut;
+    if (!this.stretch) {
+      const frame = this.peek(N);
+      if (!frame) return false;
+      for (let index = 0; index < Hs; index += 1) this.outBuf.push(frame[index]);
+      this.stretch = { tail: frame.slice(Hs, N), prevStart: 0, inPos: this.hopIn };
+      return true;
+    }
+    const state = this.stretch;
+    const nominal = Math.round(state.inPos);
+    const lo = Math.max(0, nominal - this.tolerance);
+    const hi = nominal + this.tolerance;
+    const view = this.peek(hi + N);
+    if (!view) return false;
+    let best = nominal;
+    let bestScore = -Infinity;
+    const tail = state.tail;
+    for (let start = lo; start <= hi; start += 1) {
+      let dot = 0;
+      let energy = 1e-9;
+      for (let index = 0; index < Hs; index += 1) {
+        const sample = view[start + index];
+        dot += sample * tail[index];
+        energy += sample * sample;
+      }
+      const score = dot / Math.sqrt(energy);
+      if (score > bestScore) {
+        bestScore = score;
+        best = start;
+      }
+    }
+    for (let index = 0; index < Hs; index += 1) {
+      const weight = index / Hs;
+      this.outBuf.push(tail[index] * (1 - weight) + view[best + index] * weight);
+    }
+    state.tail = view.slice(best + Hs, best + N);
+    state.prevStart = best;
+    state.inPos += this.hopIn;
+    const release = Math.max(0, Math.min(state.prevStart, Math.round(state.inPos) - this.tolerance));
+    if (release > 0) {
+      this.consume(release);
+      state.prevStart -= release;
+      state.inPos -= release;
+    }
+    return true;
   }
 
   takeSample() {
-    const chunk = this.queue[0];
-    if (!chunk) return null;
-    const value = chunk[this.headOffset];
-    this.headOffset += 1;
-    this.queuedSamples -= 1;
+    if (this.outPos >= this.outBuf.length) return null;
+    const value = this.outBuf[this.outPos];
+    this.outPos += 1;
     this.playedSamples += 1;
-    if (this.headOffset >= chunk.length) {
-      this.queue.shift();
-      this.headOffset = 0;
+    if (this.outPos >= 4096) {
+      this.outBuf = this.outBuf.slice(this.outPos);
+      this.outPos = 0;
     }
     return value;
   }
@@ -135,6 +271,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
   process(_inputs, outputs) {
     const output = outputs[0][0];
     if (!this.started && this.queuedSamples >= this.initialSamples) this.started = true;
+    if (this.started) this.fill(output.length);
     for (let index = 0; index < output.length; index += 1) {
       let value = 0;
       if (this.fadeRemaining > 0) {
@@ -158,6 +295,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
       this.port.postMessage({
         type: "status",
         droppedMs: Math.round((this.dropped / sampleRate) * 1000),
+        rate: this.rate,
         queueMs: this.queuedSamples / sampleRate * 1000,
         playedMs: this.playedSamples / sampleRate * 1000,
         buffering: !this.started,
