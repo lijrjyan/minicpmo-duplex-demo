@@ -48,12 +48,10 @@ void main() {
   float r = length(uv);
   float angle = atan(uv.y, uv.x);
 
-  // Outline: a circle at rest; the phrase envelope inflates it and the syllable
-  // envelope ripples it with low-order noise around the rim.
-  vec2 rim = vec2(cos(angle), sin(angle));
-  float ripple = noise(vec3(rim * 1.6, uWobble)) - 0.5;
-  ripple += 0.5 * (noise(vec3(rim * 3.1, uWobble * 1.3 + 7.0)) - 0.5);
-  float edge = 0.70 + 0.012 * sin(uBreath) + 0.07 * uSwell + (0.012 + 0.12 * uLevel) * ripple;
+  // Outline: a circle at rest. Only the slow phrase envelope reshapes it, as a few
+  // smooth lobes drifting around the rim; syllables never move the edge.
+  float lobes = 0.55 * sin(2.0 * angle + uWobble) + 0.35 * sin(3.0 * angle - uWobble + 1.7) + 0.20 * sin(4.0 * angle + 2.0 * uWobble + 4.1);
+  float edge = 0.72 + 0.010 * sin(uBreath) + 0.06 * uSwell + 0.035 * uSwell * lobes;
 
   // Halo outside the sphere, stronger while there is sound.
   float halo = exp(-max(r - edge, 0.0) * 9.0) * (0.10 + 0.45 * uSwell) * (0.6 + 0.4 * uDark);
@@ -70,7 +68,7 @@ void main() {
   // Domain-warped fbm: the flow speeds up and churns harder with the level.
   vec3 flow = vec3(p.xy * 1.35, uFlow);
   vec3 warp = vec3(fbm(flow + vec3(0.0, 0.0, 3.1)), fbm(flow + vec3(5.2, 1.3, 0.0)), 0.0);
-  float cloud = fbm(flow + (1.2 + 1.3 * uLevel) * warp);
+  float cloud = fbm(flow + (1.2 + 0.8 * uSwell) * warp);
   float bands = smoothstep(0.30, 0.78, cloud + 0.18 * p.y);
 
   vec3 color = mix(uDeep, uMid, bands);
@@ -178,13 +176,13 @@ export class Orb {
     this.last = now;
     const target = Math.max(0, Math.min(1, level));
     // Fast attack, slower release, so syllables pop and pauses settle.
-    this.level += (target - this.level) * (1 - Math.exp(-dt * (target > this.level ? 28 : 9)));
-    this.swell += (target - this.swell) * (1 - Math.exp(-dt * (target > this.swell ? 5 : 2.2)));
+    this.level += (target - this.level) * (1 - Math.exp(-dt * (target > this.level ? 14 : 6)));
+    this.swell += (target - this.swell) * (1 - Math.exp(-dt * (target > this.swell ? 3 : 1.4)));
     const motion = this.reduced.matches ? 0.25 : 1;
     this.speed += ((SPEED[mood] || 1) - this.speed) * (1 - Math.exp(-dt * 2));
     // Phases are integrated, not time * speed, so a speed change never jumps them.
-    this.flow = wrap(this.flow + dt * motion * (0.10 + 0.08 * this.speed + 0.35 * this.level), 1000);
-    this.wobble = wrap(this.wobble + dt * motion * (0.25 + 0.2 * this.speed + 1.2 * this.level), 1000);
+    this.flow = wrap(this.flow + dt * motion * (0.10 + 0.08 * this.speed + 0.25 * this.swell), 1000);
+    this.wobble = wrap(this.wobble + dt * motion * (0.15 + 0.15 * this.speed + 0.5 * this.swell));
     this.breath = wrap(this.breath + dt * motion * 1.3);
     const palette = (dark ? PALETTES.dark : PALETTES.light)[mood] || PALETTES.dark.idle;
     const ease = 1 - Math.exp(-dt * 3.5);
