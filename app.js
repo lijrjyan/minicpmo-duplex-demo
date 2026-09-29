@@ -1,16 +1,25 @@
-// Lite public page for a native full-duplex /v1/realtime session behind the demo gate.
+// Public voice page for a native full-duplex /v1/realtime session behind the demo gate.
 // Protocol handling lives in session.js, audio I/O in worklet.js and camera capture
-// in camera.js (all shared byte-for-byte with tools/realtime_web_demo).
+// in camera.js (all shared byte-for-byte with tools/realtime_web_demo); orb.js draws
+// the orb from the live microphone and playback levels.
 import { DuplexSession, INPUT_RATE, PACKET_SAMPLES } from "./session.js";
 import { Camera } from "./camera.js";
+import { Orb } from "./orb.js";
 
 const JITTER_MS = 300;
 const STATUS_POLL_MS = 5000;
 const SESSION_CAP_S = 600;
-const MIC_TALK_RMS = 0.02;
-const MODEL_TALK_RMS = 0.005;
+// RMS below the floor reads as silence; above it the level rises to 1 at about -14 dBFS.
+const LEVEL_FLOOR = 0.008;
+const LEVEL_GAIN = 5;
+const MIC_TALK_LEVEL = 0.12;
+const MODEL_TALK_LEVEL = 0.04;
+const CAPTION_FADE_MS = 5000;
+// Speech has gaps between syllables; a mood holds this long after the last loud frame.
+const MODEL_HOLD_MS = 700;
+const MIC_HOLD_MS = 400;
 
-const ids = ["connectBtn", "startMicBtn", "stopMicBtn", "interruptBtn", "closeBtn", "connectionState", "warnings", "transcript", "youDot", "modelDot", "timer", "cameraBtn", "cameraPreview", "frameCount"];
+const ids = ["statusPill", "statusText", "transcriptBtn", "themeBtn", "warning", "selfView", "cameraPreview", "frameCount", "orb", "orbCanvas", "statusLine", "caption", "note", "startBtn", "dock", "cameraBtn", "muteBtn", "micOn", "micOff", "interruptBtn", "endBtn", "hint", "sheet", "sheetClose", "transcript"];
 const ui = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
 
 function wsUrl() {
@@ -34,27 +43,28 @@ let micGeneration = 0;
 let captureContext = null;
 let captureStream = null;
 let captureNode = null;
+let micAnalyser = null;
 let playbackContext = null;
 let playbackNode = null;
+let playbackAnalyser = null;
 let playbackRate = 24000;
-let transcriptStarted = false;
 let eventChain = Promise.resolve();
 let remoteBusy = false;
-let serverUp = true;
-let lastCloseCode = null;
+let serverUp = null;
 let sessionStart = null;
-let micHot = 0;
-let modelHot = 0;
+let muted = false;
+let mutedResponse = false;
+let lastSpokeAt = 0;
+let lastModelLoudAt = -Infinity;
+let lastMicLoudAt = -Infinity;
+let warnTimer = null;
 // The camera is offered only when the server declares image input in
 // session.updated; window.DEMO_CAMERA = false hides it even then.
 const OFFER_CAMERA = window.DEMO_CAMERA !== false;
 const camera = new Camera(ui.cameraPreview);
 let startingCamera = false;
-
-function setState(label, state) {
-  ui.connectionState.textContent = label;
-  ui.connectionState.dataset.state = state;
-}
+const orb = new Orb(ui.orbCanvas);
+const darkQuery = matchMedia("(prefers-color-scheme: dark)");
 
 function isOpen() {
   return Boolean(socket) && socket.readyState === WebSocket.OPEN;
@@ -64,30 +74,157 @@ function isReady() {
   return Boolean(session) && session.state === "ready" && isOpen();
 }
 
-function inputActive() {
-  return Boolean(captureStream);
+function inCall() {
+  return isOpen() || connecting;
 }
 
-let mutedResponse = false;
+function isDark() {
+  const forced = document.documentElement.dataset.theme;
+  return forced ? forced === "dark" : darkQuery.matches;
+}
+
+function warn(message, sticky = false) {
+  clearTimeout(warnTimer);
+  ui.warning.textContent = message;
+  ui.warning.hidden = !message;
+  if (message && !sticky) warnTimer = setTimeout(() => { ui.warning.hidden = true; }, 7000);
+}
 
 function setButtons() {
+  const call = inCall();
+  ui.startBtn.hidden = call;
+  ui.dock.hidden = !call;
+  ui.note.hidden = call;
+  ui.caption.hidden = !call;
+  ui.startBtn.disabled = remoteBusy || serverUp === false;
+  ui.orb.setAttribute("aria-label", call ? "Show transcript" : "Start conversation");
   ui.interruptBtn.disabled = !(session && session.responseOpen) || mutedResponse;
-  ui.connectBtn.disabled = isOpen() || connecting || (!socket && (remoteBusy || !serverUp));
-  ui.startMicBtn.disabled = !isReady() || inputActive() || startingMic;
-  ui.stopMicBtn.disabled = !inputActive();
-  ui.closeBtn.disabled = !isOpen();
+  ui.muteBtn.disabled = !captureStream;
+  ui.muteBtn.setAttribute("aria-pressed", String(muted));
+  ui.muteBtn.setAttribute("aria-label", muted ? "Unmute microphone" : "Mute microphone");
+  ui.muteBtn.title = muted ? "Unmute microphone" : "Mute microphone";
+  ui.micOn.hidden = muted;
+  ui.micOff.hidden = !muted;
   const offerCamera = OFFER_CAMERA && Boolean(session && session.imageGranted && isReady());
   ui.cameraBtn.hidden = !offerCamera;
-  ui.cameraBtn.disabled = !offerCamera || startingCamera;
-  ui.cameraBtn.textContent = camera.active ? "Camera off" : "Camera";
-  ui.cameraPreview.hidden = !camera.active;
-  ui.frameCount.hidden = !camera.active;
+  ui.cameraBtn.disabled = startingCamera;
+  ui.cameraBtn.setAttribute("aria-pressed", String(camera.active));
+  ui.cameraBtn.setAttribute("aria-label", camera.active ? "Turn camera off" : "Turn camera on");
+  ui.selfView.hidden = !camera.active;
+}
+
+// Level (0..1) from an analyser's current time-domain window.
+const levelBuffer = new Float32Array(1024);
+function levelOf(analyser) {
+  if (!analyser) return 0;
+  const samples = levelBuffer.subarray(0, analyser.fftSize);
+  analyser.getFloatTimeDomainData(samples);
+  let energy = 0;
+  for (let index = 0; index < samples.length; index += 1) energy += samples[index] * samples[index];
+  const rms = Math.sqrt(energy / samples.length);
+  return Math.min(1, Math.max(0, (rms - LEVEL_FLOOR) * LEVEL_GAIN) ** 0.7);
+}
+
+// What the orb and the status line show, derived every frame.
+function mood(micLevel, modelLevel, now) {
+  if (session && session.state === "error") return { mood: "error", level: 0, line: "Something went wrong" };
+  if (connecting || (isOpen() && !isReady())) return { mood: "idle", level: 0.15, line: "Connecting…" };
+  if (!isOpen()) {
+    if (serverUp === false) return { mood: "idle", level: 0, line: "The demo is offline right now" };
+    if (remoteBusy) return { mood: "idle", level: 0, line: "Someone else is talking to it, try again soon" };
+    return { mood: "idle", level: 0, line: "" };
+  }
+  if (now - lastModelLoudAt < MODEL_HOLD_MS) return { mood: "speaking", level: modelLevel, line: "" };
+  if (muted) return { mood: "idle", level: 0, line: "Microphone muted" };
+  if (!captureStream) return { mood: "idle", level: 0, line: startingMic ? "Allow the microphone to start" : "" };
+  if (now - lastMicLoudAt < MIC_HOLD_MS) return { mood: "user", level: micLevel, line: "Listening" };
+  return { mood: "listening", level: micLevel, line: session.responseOpen ? "Thinking…" : "Listening" };
+}
+
+function render(now) {
+  const micLevel = muted ? 0 : levelOf(micAnalyser);
+  const modelLevel = levelOf(playbackAnalyser);
+  if (modelLevel > MODEL_TALK_LEVEL) lastModelLoudAt = now;
+  if (micLevel > MIC_TALK_LEVEL) lastMicLoudAt = now;
+  const state = mood(micLevel, modelLevel, now);
+  if (state.mood === "speaking") lastSpokeAt = now;
+  orb.frame(now, state.level, state.mood, isDark());
+  if (ui.statusLine.textContent !== state.line) ui.statusLine.textContent = state.line;
+  ui.caption.dataset.fade = String(!(session && session.responseOpen) && now - lastSpokeAt > CAPTION_FADE_MS);
+  requestAnimationFrame(render);
+}
+
+function tick() {
+  let label;
+  let pill;
+  if (isOpen() && sessionStart !== null) {
+    const left = Math.max(0, SESSION_CAP_S - Math.floor((performance.now() - sessionStart) / 1000));
+    label = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+    pill = "live";
+  } else if (inCall()) {
+    label = "connecting";
+    pill = "connecting";
+  } else if (serverUp === null) {
+    label = "checking…";
+    pill = "idle";
+  } else if (serverUp === false) {
+    label = "offline";
+    pill = "error";
+  } else if (remoteBusy) {
+    label = "busy";
+    pill = "busy";
+  } else {
+    label = "available";
+    pill = "idle";
+  }
+  ui.statusText.textContent = label;
+  ui.statusPill.dataset.state = pill;
+  ui.hint.textContent = isOpen() && sessionStart !== null ? "Just talk. Interrupt it any time by speaking." : "";
+}
+
+async function pollStatus() {
+  if (!window.DEMO_STATUS_URL) {
+    serverUp = true;
+    return;
+  }
+  try {
+    const response = await fetch(window.DEMO_STATUS_URL, { cache: "no-store" });
+    const body = await response.json();
+    serverUp = Boolean(body.ok);
+    remoteBusy = Boolean(body.busy) && !isOpen();
+  } catch {
+    serverUp = false;
+  }
+  setButtons();
+}
+
+function renderTranscript() {
+  const text = session ? session.transcript : "";
+  const paragraphs = text.split("\n").filter((line) => line.trim());
+  if (!paragraphs.length) {
+    ui.transcript.innerHTML = '<p class="empty">What the model says will appear here.</p>';
+    ui.caption.textContent = "";
+    return;
+  }
+  ui.transcript.replaceChildren(...paragraphs.map((line) => {
+    const paragraph = document.createElement("p");
+    paragraph.textContent = line;
+    return paragraph;
+  }));
+  ui.transcript.scrollTop = ui.transcript.scrollHeight;
+  // The caption follows the answer being spoken, or the last one once it ends.
+  ui.caption.textContent = paragraphs.at(-1);
 }
 
 function renderFrames() {
   if (!session) return;
   const { sent, accepted, rejected } = session.frameStats;
-  ui.frameCount.textContent = `frames sent / accepted: ${sent} / ${accepted}${rejected ? ` (${rejected} rejected)` : ""}`;
+  ui.frameCount.textContent = `${accepted}/${sent} frames${rejected ? ` · ${rejected} rejected` : ""}`;
+}
+
+function setSheet(open) {
+  ui.sheet.dataset.open = String(open);
+  ui.transcriptBtn.setAttribute("aria-expanded", String(open));
 }
 
 async function startCamera() {
@@ -116,48 +253,6 @@ function stopCamera() {
   setButtons();
 }
 
-// Status line: connected / listening / speaking while in a session, busy / disconnected otherwise.
-function refreshState() {
-  if (isOpen() && session) {
-    if (session.state === "error") setState("error", "error");
-    else if (session.state !== "ready") setState(session.state === "closing" ? "closing" : "connected", "connected");
-    else if (modelHot > 0) setState("speaking", "speaking");
-    else if (inputActive()) setState("listening", "listening");
-    else setState("connected", "connected");
-  } else if (connecting) setState("connecting", "connected");
-  else if (!serverUp) setState("offline, try again later", "error");
-  else if (remoteBusy) setState("busy, try again later", "busy");
-  else setState("disconnected", "disconnected");
-}
-
-function warn(message) {
-  ui.warnings.textContent = message;
-}
-
-function tick() {
-  ui.youDot.dataset.on = String(micHot > 0);
-  ui.modelDot.dataset.on = String(modelHot > 0);
-  if (sessionStart !== null && isOpen()) {
-    const left = Math.max(0, SESSION_CAP_S - Math.floor((performance.now() - sessionStart) / 1000));
-    ui.timer.textContent = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")} left`;
-  } else ui.timer.textContent = "";
-  refreshState();
-}
-
-async function pollStatus() {
-  if (!window.DEMO_STATUS_URL) return;
-  try {
-    const response = await fetch(window.DEMO_STATUS_URL, { cache: "no-store" });
-    const body = await response.json();
-    serverUp = Boolean(body.ok);
-    remoteBusy = Boolean(body.busy) && !isOpen();
-  } catch {
-    serverUp = false;
-  }
-  setButtons();
-  refreshState();
-}
-
 async function ensurePlayback(rate) {
   if (playbackContext && playbackRate === rate) {
     await playbackContext.resume();
@@ -172,10 +267,10 @@ async function ensurePlayback(rate) {
     processorOptions: { initialSamples: Math.max(1, Math.round(playbackContext.sampleRate * JITTER_MS / 1000)) },
   });
   playbackNode.connect(playbackContext.destination);
-  playbackNode.port.onmessage = ({ data }) => {
-    if (data.type !== "status") return;
-    modelHot = data.outputRms > MODEL_TALK_RMS ? 3 : Math.max(0, modelHot - 1);
-  };
+  // A side tap for the orb; it measures exactly what reaches the speaker.
+  playbackAnalyser = playbackContext.createAnalyser();
+  playbackAnalyser.fftSize = 1024;
+  playbackNode.connect(playbackAnalyser);
   await playbackContext.resume();
 }
 
@@ -202,13 +297,13 @@ function sessionListeners() {
       if (state !== "ready") stopCamera();
       if (state === "closed" || state === "error") stopInput();
       setButtons();
-      refreshState();
     },
     granted: async () => {
       sessionStart = performance.now();
       await ensurePlayback(session.outputRate);
       setButtons();
-      refreshState();
+      // One tap starts everything: the microphone follows the grant.
+      startMic().catch((error) => warn(`Microphone: ${error.message}`, true));
     },
     audio: (bytes) => {
       if (!playbackNode) return;
@@ -224,16 +319,9 @@ function sessionListeners() {
       if (playbackNode) playbackNode.port.postMessage({ type: open ? "open" : "flush" });
       // A new answer means whatever is still queued belongs to the previous one.
       if (open && playbackNode) playbackNode.port.postMessage({ type: "trim", keepSamples: Math.round(playbackContext.sampleRate * 0.5) });
-      if (transcriptStarted) ui.transcript.textContent = session.transcript;
+      renderTranscript();
     },
-    text: () => {
-      if (!transcriptStarted) {
-        ui.transcript.textContent = "";
-        ui.transcript.classList.remove("empty");
-        transcriptStarted = true;
-      }
-      ui.transcript.textContent = session.transcript;
-    },
+    text: renderTranscript,
     unit: (unit) => {
       // The model stopped talking (a unit without audio): what is still queued was
       // generated before that decision, keep at most one unit of it.
@@ -242,7 +330,7 @@ function sessionListeners() {
     drained: () => {},
     image: () => setButtons(),
     frame: renderFrames,
-    warning: warn,
+    warning: (message) => warn(message),
   };
 }
 
@@ -252,15 +340,13 @@ async function connect() {
   connecting = true;
   await stopInput();
   stopCamera();
-  transcriptStarted = false;
-  lastCloseCode = null;
   sessionStart = null;
-  ui.transcript.textContent = "What the model says will appear here.";
-  ui.transcript.classList.add("empty");
+  muted = false;
+  session = null;
+  renderTranscript();
   warn("");
   if (playbackNode) playbackNode.port.postMessage({ type: "reset" });
   setButtons();
-  refreshState();
   let activeSocket = null;
   try {
     // Open playback inside the click so Chrome's autoplay policy lets it run.
@@ -281,7 +367,6 @@ async function connect() {
       connecting = false;
       remoteBusy = false;
       setButtons();
-      refreshState();
     });
     activeSocket.addEventListener("message", (message) => {
       eventChain = eventChain.then(async () => {
@@ -291,41 +376,38 @@ async function connect() {
     });
     activeSocket.addEventListener("error", () => {
       if (socket !== activeSocket) return;
-      if (!lastCloseCode) warn("Could not reach the demo server. It may be offline; please try again later.");
+      warn("Could not reach the demo server. It may be offline; please try again later.", true);
     });
     activeSocket.addEventListener("close", async (event) => {
       if (socket !== activeSocket) return;
-      lastCloseCode = event.code;
       connecting = false;
       socket = null;
       await stopInput();
       stopCamera();
-      if (CLOSE_MESSAGES[event.code]) warn(CLOSE_MESSAGES[event.code]);
+      if (CLOSE_MESSAGES[event.code]) warn(CLOSE_MESSAGES[event.code], true);
       if (event.code === 4429) remoteBusy = true;
       if (playbackNode) playbackNode.port.postMessage({ type: "reset" });
-      modelHot = 0;
       setButtons();
-      refreshState();
       pollStatus();
     });
   } catch (error) {
     connecting = false;
     if (activeSocket && activeSocket.readyState < WebSocket.CLOSING) activeSocket.close();
     socket = null;
-    warn(error.message);
+    warn(error.message, true);
     setButtons();
-    refreshState();
   }
 }
 
-function feedInput(frame, rms) {
+function feedInput(frame) {
   if (!isReady()) return;
+  // Muting sends silence rather than stopping, so the unit clock and camera frames keep going.
+  if (muted) frame.fill(0);
   session.pushInput(frame);
-  micHot = rms > MIC_TALK_RMS ? 4 : Math.max(0, micHot - 1);
 }
 
 async function startMic() {
-  if (startingMic || inputActive() || !isReady()) return;
+  if (startingMic || captureStream || !isReady()) return;
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error("Microphone capture needs Chrome on an HTTPS page.");
   startingMic = true;
   const generation = micGeneration;
@@ -347,23 +429,26 @@ async function startMic() {
     const silent = pendingContext.createGain();
     silent.gain.value = 0;
     source.connect(pendingNode).connect(silent).connect(pendingContext.destination);
+    const analyser = pendingContext.createAnalyser();
+    analyser.fftSize = 1024;
+    source.connect(analyser);
     await pendingContext.resume();
     if (stale()) throw new Error("the session changed while the microphone was starting");
     captureStream = pendingStream;
     captureContext = pendingContext;
     captureNode = pendingNode;
+    micAnalyser = analyser;
     pendingStream = null;
     pendingContext = null;
     pendingNode.port.onmessage = ({ data }) => {
       if (data.type !== "frame" || captureNode !== pendingNode) return;
-      feedInput(new Int16Array(data.frame), data.rms);
+      feedInput(new Int16Array(data.frame));
     };
   } finally {
     if (pendingStream) pendingStream.getTracks().forEach((track) => track.stop());
     if (pendingContext) await pendingContext.close().catch(() => {});
     startingMic = false;
     setButtons();
-    refreshState();
   }
 }
 
@@ -374,7 +459,7 @@ async function stopInput() {
   if (captureStream) captureStream.getTracks().forEach((track) => track.stop());
   captureStream = null;
   captureNode = null;
-  micHot = 0;
+  micAnalyser = null;
   if (captureContext) await captureContext.close().catch(() => {});
   captureContext = null;
   setButtons();
@@ -385,22 +470,47 @@ async function closeNow() {
   stopCamera();
   if (playbackNode) playbackNode.port.postMessage({ type: "clear" });
   if (session && isOpen()) session.close();
+  else if (socket) socket.close();
   setButtons();
 }
 
-ui.connectBtn.addEventListener("click", () => connect().catch((error) => warn(error.message)));
-ui.startMicBtn.addEventListener("click", () => startMic().catch((error) => warn(`Microphone: ${error.message}`)));
-ui.stopMicBtn.addEventListener("click", () => stopInput().catch((error) => warn(error.message)));
-ui.cameraBtn.addEventListener("click", () => (camera.active ? stopCamera() : startCamera().catch((error) => warn(`Camera: ${error.message}`))));
-ui.interruptBtn.addEventListener("click", () => {
+function interrupt() {
   mutedResponse = true;
   if (playbackNode) playbackNode.port.postMessage({ type: "clear" });
   setButtons();
+}
+
+const start = () => connect().catch((error) => warn(error.message, true));
+ui.startBtn.addEventListener("click", start);
+ui.orb.addEventListener("click", () => {
+  if (inCall()) setSheet(ui.sheet.dataset.open !== "true");
+  else if (!ui.startBtn.disabled) start();
 });
-ui.closeBtn.addEventListener("click", () => closeNow().catch((error) => warn(error.message)));
+ui.muteBtn.addEventListener("click", () => {
+  muted = !muted;
+  setButtons();
+});
+ui.cameraBtn.addEventListener("click", () => (camera.active ? stopCamera() : startCamera().catch((error) => warn(`Camera: ${error.message}`))));
+ui.interruptBtn.addEventListener("click", interrupt);
+ui.endBtn.addEventListener("click", () => closeNow().catch((error) => warn(error.message)));
+ui.transcriptBtn.addEventListener("click", () => setSheet(ui.sheet.dataset.open !== "true"));
+ui.sheetClose.addEventListener("click", () => setSheet(false));
+ui.themeBtn.addEventListener("click", () => {
+  const next = isDark() ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem("theme", next); } catch {}
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") setSheet(false);
+});
+try {
+  const saved = localStorage.getItem("theme");
+  if (saved) document.documentElement.dataset.theme = saved;
+} catch {}
 window.addEventListener("beforeunload", () => { if (session && isOpen()) session.close(); });
-setInterval(tick, 100);
+setInterval(tick, 250);
 setInterval(pollStatus, STATUS_POLL_MS);
 pollStatus();
 setButtons();
-refreshState();
+tick();
+requestAnimationFrame(render);

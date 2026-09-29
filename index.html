@@ -2,95 +2,220 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MiniCPM-o full-duplex demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>MiniCPM-o Live</title>
   <link rel="icon" href="data:,">
   <style>
     :root {
-      color-scheme: dark;
-      --bg: #07111f;
-      --surface: #101d2f;
-      --surface-2: #17263a;
-      --border: #2b3b51;
-      --text: #f1f5f9;
-      --muted: #9fb0c4;
-      --accent: #5eead4;
-      --user: #93c5fd;
-      --danger: #fda4af;
-      --warning: #fcd34d;
-      --focus: #93c5fd;
+      color-scheme: light dark;
+      --bg: #f6f7fb;
+      --surface: rgba(255, 255, 255, .78);
+      --surface-solid: #ffffff;
+      --border: rgba(15, 23, 42, .10);
+      --text: #0f172a;
+      --muted: #64748b;
+      --faint: #94a3b8;
+      --accent: #2563eb;
+      --speak: #0d9488;
+      --danger: #e11d48;
+      --danger-text: #ffffff;
+      --warning: #b45309;
+      --btn: rgba(15, 23, 42, .06);
+      --btn-hover: rgba(15, 23, 42, .11);
+      --shadow: 0 10px 30px rgba(15, 23, 42, .10);
       font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg: #05070d;
+        --surface: rgba(22, 27, 38, .78);
+        --surface-solid: #111723;
+        --border: rgba(226, 232, 240, .10);
+        --text: #eef2f7;
+        --muted: #94a3b8;
+        --faint: #5b6678;
+        --accent: #60a5fa;
+        --speak: #5eead4;
+        --danger: #f43f5e;
+        --warning: #fbbf24;
+        --btn: rgba(226, 232, 240, .08);
+        --btn-hover: rgba(226, 232, 240, .15);
+        --shadow: 0 10px 30px rgba(0, 0, 0, .45);
+      }
+    }
+    :root[data-theme="dark"] {
+      --bg: #05070d;
+      --surface: rgba(22, 27, 38, .78);
+      --surface-solid: #111723;
+      --border: rgba(226, 232, 240, .10);
+      --text: #eef2f7;
+      --muted: #94a3b8;
+      --faint: #5b6678;
+      --accent: #60a5fa;
+      --speak: #5eead4;
+      --danger: #f43f5e;
+      --warning: #fbbf24;
+      --btn: rgba(226, 232, 240, .08);
+      --btn-hover: rgba(226, 232, 240, .15);
+      --shadow: 0 10px 30px rgba(0, 0, 0, .45);
+    }
     * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100dvh; background: var(--bg); color: var(--text); }
-    main { width: min(760px, calc(100% - 32px)); margin: 0 auto; padding: 32px 0 56px; }
-    h1 { margin: 0 0 12px; font-size: clamp(1.35rem, 3.6vw, 1.9rem); letter-spacing: -0.02em; }
-    p.note { margin: 0 0 20px; color: var(--muted); line-height: 1.6; }
-    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 18px; margin-bottom: 16px; }
-    .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
-    .status { font: 600 .9rem ui-monospace, SFMono-Regular, Consolas, monospace; padding: 7px 12px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
-    .status[data-state="connected"], .status[data-state="listening"] { color: var(--accent); border-color: #27716b; background: #0b2b2c; }
-    .status[data-state="speaking"] { color: #042523; background: var(--accent); border-color: var(--accent); }
-    .status[data-state="busy"] { color: var(--warning); border-color: #7c6420; background: #2d260d; }
-    .status[data-state="error"] { color: var(--danger); border-color: #7f3340; background: #35151e; }
-    .talk { display: flex; gap: 14px; font-size: .85rem; color: var(--muted); }
-    .talk span { display: inline-flex; align-items: center; gap: 6px; }
-    .dot { width: 11px; height: 11px; border-radius: 50%; background: #334155; transition: background 120ms linear; }
-    #youDot[data-on="true"] { background: var(--user); }
-    #modelDot[data-on="true"] { background: var(--accent); }
-    .controls { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
-    button { min-height: 44px; padding: 0 18px; border: 1px solid var(--border); border-radius: 9px; color: var(--text); background: var(--surface-2); font: 650 .9rem inherit; cursor: pointer; touch-action: manipulation; }
-    button:hover:not(:disabled) { background: #20344d; border-color: #48617e; }
-    button.primary { color: #042523; background: var(--accent); border-color: var(--accent); }
-    button.danger { color: var(--danger); border-color: #713342; }
-    button:disabled { opacity: .42; cursor: not-allowed; }
-    button:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
-    .camera { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 12px; color: var(--muted); font: .82rem ui-monospace, monospace; }
-    #cameraPreview { width: 160px; max-width: 100%; aspect-ratio: 4 / 3; border-radius: 8px; border: 1px solid var(--border); background: #091421; object-fit: cover; }
     [hidden] { display: none !important; }
-    .camera:not(:has(> :not([hidden]))) { display: none; }
-    #warnings { min-height: 22px; margin: 12px 0 0; color: var(--warning); font-size: .88rem; }
-    #timer { color: var(--muted); font: .82rem ui-monospace, monospace; }
-    h2 { margin: 0 0 10px; font-size: .95rem; }
-    .transcript { min-height: 200px; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .9rem/1.6 ui-sans-serif, system-ui, sans-serif; color: #dbeafe; }
-    .empty { color: #72849a; }
-    @media (max-width: 430px) { main { width: calc(100% - 32px); padding-top: 20px; } .controls button { flex: 1 1 calc(50% - 10px); } }
+    html, body { height: 100%; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      display: grid; grid-template-rows: auto 1fr auto; min-height: 100dvh; overflow: hidden;
+      -webkit-tap-highlight-color: transparent;
+    }
+    button { font: inherit; color: inherit; }
+    button:focus-visible, .orb:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+
+    /* Top bar */
+    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: max(14px, env(safe-area-inset-top)) 16px 8px; }
+    .brand { display: flex; flex-direction: column; line-height: 1.2; min-width: 0; }
+    .brand strong { font-size: 1rem; letter-spacing: -.01em; }
+    .brand span { font-size: .75rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .top-actions { display: flex; align-items: center; gap: 8px; }
+    .pill { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 12px; border-radius: 999px; background: var(--btn); color: var(--muted); font-size: .8rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .pill i { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+    .pill[data-state="live"] i { background: #22c55e; box-shadow: 0 0 0 4px rgba(34, 197, 94, .18); }
+    .pill[data-state="busy"] i { background: var(--warning); }
+    .pill[data-state="error"] i { background: var(--danger); }
+    .pill[data-state="connecting"] i { background: var(--accent); animation: blink 1s ease-in-out infinite; }
+    @keyframes blink { 50% { opacity: .25; } }
+    .icon-btn { width: 36px; height: 36px; display: grid; place-items: center; border: 0; border-radius: 50%; background: transparent; color: var(--muted); cursor: pointer; }
+    .icon-btn:hover { background: var(--btn); color: var(--text); }
+    .icon-btn svg, .dock-btn svg { width: 20px; height: 20px; }
+
+    /* Stage */
+    .stage { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; padding: 8px 16px; min-height: 0; }
+    .orb { position: relative; width: min(72vw, 46dvh, 380px); aspect-ratio: 1; border: 0; padding: 0; background: none; cursor: pointer; border-radius: 50%; }
+    .orb canvas { position: absolute; inset: -18%; width: 136%; height: 136%; pointer-events: none; }
+    /* CSS fallback when WebGL is unavailable. */
+    .orb::before {
+      content: ""; position: absolute; inset: 0; border-radius: 50%;
+      background: radial-gradient(circle at 35% 30%, #e0f2fe, #38bdf8 45%, #1e3a8a 100%);
+      transform: scale(calc(.92 + var(--level, 0) * .14)); transition: transform 80ms linear;
+    }
+    .orb.has-gl::before { display: none; }
+    .status-line { min-height: 1.4em; font-size: 1.05rem; font-weight: 600; letter-spacing: -.01em; text-align: center; }
+    .caption {
+      width: min(640px, 100%); min-height: 3.2em; max-height: 4.8em; overflow: hidden; margin: 0;
+      color: var(--muted); font-size: 1rem; line-height: 1.6; text-align: center;
+      display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+      transition: opacity 400ms ease;
+    }
+    .caption[data-fade="true"] { opacity: .35; }
+    .note { max-width: 520px; margin: 0; color: var(--muted); font-size: .85rem; line-height: 1.55; text-align: center; }
+    .warning {
+      position: absolute; top: 4px; left: 50%; transform: translateX(-50%); width: min(560px, calc(100% - 32px));
+      padding: 10px 14px; border-radius: 12px; background: var(--surface-solid); box-shadow: var(--shadow); border: 1px solid var(--border);
+      color: var(--warning); font-size: .88rem; line-height: 1.45; text-align: center; z-index: 3;
+    }
+
+    /* Camera self view */
+    .self-view { position: absolute; top: 8px; right: 16px; width: min(28vw, 168px); aspect-ratio: 3 / 4; border-radius: 16px; overflow: hidden; background: #000; box-shadow: var(--shadow); z-index: 2; }
+    .self-view video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+    .self-view span { position: absolute; left: 8px; bottom: 8px; padding: 3px 8px; border-radius: 999px; background: rgba(0, 0, 0, .55); color: #fff; font-size: .7rem; font-variant-numeric: tabular-nums; }
+
+    /* Dock */
+    .dock-wrap { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 8px 16px max(22px, env(safe-area-inset-bottom)); }
+    .dock { display: flex; align-items: center; gap: 14px; }
+    .dock-btn { width: 56px; height: 56px; display: grid; place-items: center; border: 0; border-radius: 50%; background: var(--btn); color: var(--text); cursor: pointer; transition: background 150ms, transform 150ms; touch-action: manipulation; }
+    .dock-btn:hover:not(:disabled) { background: var(--btn-hover); }
+    .dock-btn:active:not(:disabled) { transform: scale(.94); }
+    .dock-btn:disabled { opacity: .35; cursor: not-allowed; }
+    .dock-btn[aria-pressed="true"] { background: var(--text); color: var(--bg); }
+    .dock-btn.end { background: var(--danger); color: var(--danger-text); }
+    .start-btn { height: 56px; padding: 0 28px; border: 0; border-radius: 999px; background: var(--text); color: var(--bg); font-weight: 650; font-size: 1rem; cursor: pointer; display: inline-flex; align-items: center; gap: 10px; touch-action: manipulation; }
+    .start-btn:disabled { opacity: .4; cursor: not-allowed; }
+    .start-btn svg { width: 20px; height: 20px; }
+    .hint { color: var(--faint); font-size: .75rem; min-height: 1em; font-variant-numeric: tabular-nums; }
+
+    /* Transcript sheet */
+    .sheet {
+      position: fixed; left: 50%; bottom: 0; transform: translate(-50%, 105%); width: min(720px, 100%); max-height: 70dvh;
+      display: flex; flex-direction: column; background: var(--surface-solid); border: 1px solid var(--border); border-bottom: 0;
+      border-radius: 20px 20px 0 0; box-shadow: var(--shadow); transition: transform 280ms cubic-bezier(.2, .8, .2, 1); z-index: 5;
+    }
+    .sheet[data-open="true"] { transform: translate(-50%, 0); }
+    .sheet header { display: flex; align-items: center; justify-content: space-between; padding: 12px 12px 8px 20px; font-weight: 650; }
+    .sheet .transcript { overflow-y: auto; padding: 0 20px max(20px, env(safe-area-inset-bottom)); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; }
+    .transcript .empty { color: var(--faint); }
+    .transcript p { margin: 0 0 12px; }
+    @media (max-width: 420px) {
+      .dock { gap: 10px; }
+      .dock-btn { width: 52px; height: 52px; }
+      .brand span { display: none; }
+      .self-view { width: 88px; right: 12px; border-radius: 12px; }
+      .self-view span { display: none; }
+    }
   </style>
 </head>
 <body>
-  <main>
-    <h1>MiniCPM-o 4.5 full-duplex demo (sglang-omni)</h1>
-    <p class="note">Talk to MiniCPM-o 4.5 in native full duplex: it listens and speaks at the same time, and you can interrupt it just by talking. Only one person can use the demo at a time, and each session is capped at 10 minutes. Please use headphones so the model does not hear itself, use Chrome, and speak English.</p>
+  <header class="topbar">
+    <div class="brand">
+      <strong>MiniCPM-o 4.5 Live</strong>
+      <span>native full duplex · served by sglang-omni</span>
+    </div>
+    <div class="top-actions">
+      <div id="statusPill" class="pill" data-state="idle" role="status" aria-live="polite"><i></i><span id="statusText">checking…</span></div>
+      <button id="transcriptBtn" class="icon-btn" type="button" title="Transcript" aria-label="Show transcript" aria-controls="sheet" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+      </button>
+      <button id="themeBtn" class="icon-btn" type="button" title="Toggle theme" aria-label="Toggle light or dark theme">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/></svg>
+      </button>
+    </div>
+  </header>
 
-    <section class="card" aria-label="Session">
-      <div class="row">
-        <div id="connectionState" class="status" data-state="disconnected" role="status" aria-live="polite">disconnected</div>
-        <div class="talk" aria-label="Who is talking">
-          <span><i id="youDot" class="dot" data-on="false"></i>you</span>
-          <span><i id="modelDot" class="dot" data-on="false"></i>model</span>
-          <span id="timer"></span>
-        </div>
-      </div>
-      <div class="controls" aria-label="Session controls">
-        <button id="connectBtn" class="primary" type="button">Connect</button>
-        <button id="startMicBtn" type="button" disabled>Start mic</button>
-        <button id="cameraBtn" type="button" hidden disabled title="Send one camera frame per second while the mic is on">Camera</button>
-        <button id="stopMicBtn" type="button" disabled>Stop mic</button>
-        <button id="interruptBtn" type="button" disabled title="Mute the current answer right away (the model itself yields only to a full sentence, about 2 s later)">Interrupt</button>
-        <button id="closeBtn" class="danger" type="button" disabled>End</button>
-      </div>
-      <div class="camera" aria-label="Camera">
-        <video id="cameraPreview" muted playsinline autoplay hidden aria-label="Camera preview"></video>
-        <span id="frameCount" hidden role="status"></span>
-      </div>
-      <div id="warnings" role="alert" aria-live="polite"></div>
-    </section>
-
-    <section class="card" aria-labelledby="transcriptHeading">
-      <h2 id="transcriptHeading">Transcript (model)</h2>
-      <div id="transcript" class="transcript empty" aria-live="polite">What the model says will appear here.</div>
-    </section>
+  <main class="stage">
+    <div id="warning" class="warning" role="alert" hidden></div>
+    <div id="selfView" class="self-view" hidden>
+      <video id="cameraPreview" muted playsinline autoplay aria-label="Camera preview"></video>
+      <span id="frameCount"></span>
+    </div>
+    <button id="orb" class="orb" type="button" aria-label="Start conversation">
+      <canvas id="orbCanvas" aria-hidden="true"></canvas>
+    </button>
+    <div id="statusLine" class="status-line" aria-live="polite"></div>
+    <p id="caption" class="caption" aria-live="polite"></p>
+    <p id="note" class="note">Talk to MiniCPM-o 4.5 in native full duplex: it listens while it speaks, and you can cut in just by talking. Use headphones and Chrome, and speak English. One person at a time, up to 10 minutes.</p>
   </main>
+
+  <footer class="dock-wrap">
+    <button id="startBtn" class="start-btn" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+      <span>Start talking</span>
+    </button>
+    <div id="dock" class="dock" role="group" aria-label="Call controls" hidden>
+      <button id="cameraBtn" class="dock-btn" type="button" aria-pressed="false" title="Camera" aria-label="Turn camera on" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5h11a1.5 1.5 0 0 1 1.5 1.5v6A1.5 1.5 0 0 1 14 16.5H3A1.5 1.5 0 0 1 1.5 15V9A1.5 1.5 0 0 1 3 7.5z"/><path d="m15.5 11 6-3.5v9l-6-3.5z"/></svg>
+      </button>
+      <button id="muteBtn" class="dock-btn" type="button" aria-pressed="false" title="Mute microphone" aria-label="Mute microphone">
+        <svg id="micOn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+        <svg id="micOff" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" hidden><path d="M15 10V6a3 3 0 0 0-5.7-1.3M9 9v2a3 3 0 0 0 5 2.2M5 11a7 7 0 0 0 11.6 5.3M19 11a7 7 0 0 1-.5 2.6M12 18v3M3 3l18 18"/></svg>
+      </button>
+      <button id="interruptBtn" class="dock-btn" type="button" title="Stop the current answer" aria-label="Stop the current answer" disabled>
+        <svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>
+      </button>
+      <button id="endBtn" class="dock-btn end" type="button" title="End" aria-label="End conversation">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+    </div>
+    <div id="hint" class="hint"></div>
+  </footer>
+
+  <section id="sheet" class="sheet" data-open="false" aria-label="Transcript">
+    <header>
+      <span>Transcript</span>
+      <button id="sheetClose" class="icon-btn" type="button" aria-label="Close transcript">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+    </header>
+    <div id="transcript" class="transcript"><p class="empty">What the model says will appear here.</p></div>
+  </section>
+
   <script src="config.js"></script>
   <script type="module" src="app.js"></script>
 </body>
