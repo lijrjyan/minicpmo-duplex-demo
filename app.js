@@ -114,7 +114,7 @@ function setButtons() {
 }
 
 // Level (0..1) from an analyser's current time-domain window.
-const levelBuffer = new Float32Array(1024);
+const levelBuffer = new Float32Array(2048);
 function levelOf(analyser) {
   if (!analyser) return 0;
   const samples = levelBuffer.subarray(0, analyser.fftSize);
@@ -128,7 +128,7 @@ function levelOf(analyser) {
 // What the orb and the status line show, derived every frame.
 function mood(micLevel, modelLevel, now) {
   if (session && session.state === "error") return { mood: "error", level: 0, line: "Something went wrong" };
-  if (connecting || (isOpen() && !isReady())) return { mood: "idle", level: 0.15, line: "Connecting…" };
+  if (connecting || (isOpen() && !isReady())) return { mood: "thinking", level: 0, line: "Connecting…" };
   if (!isOpen()) {
     if (serverUp === false) return { mood: "idle", level: 0, line: "The demo is offline right now" };
     if (remoteBusy) return { mood: "idle", level: 0, line: "Someone else is talking to it, try again soon" };
@@ -136,9 +136,10 @@ function mood(micLevel, modelLevel, now) {
   }
   if (now - lastModelLoudAt < MODEL_HOLD_MS) return { mood: "speaking", level: modelLevel, line: "" };
   if (muted) return { mood: "idle", level: 0, line: "Microphone muted" };
-  if (!captureStream) return { mood: "idle", level: 0, line: startingMic ? "Allow the microphone to start" : "" };
+  if (!captureStream) return { mood: "idle", level: 0, line: startingMic ? "Allow the microphone to start" : "Microphone off" };
   if (now - lastMicLoudAt < MIC_HOLD_MS) return { mood: "user", level: micLevel, line: "Listening" };
-  return { mood: "listening", level: micLevel, line: session.responseOpen ? "Thinking…" : "Listening" };
+  if (session.responseOpen) return { mood: "thinking", level: 0, line: "Thinking…" };
+  return { mood: "listening", level: micLevel, line: "Listening" };
 }
 
 function render(now) {
@@ -148,7 +149,7 @@ function render(now) {
   if (micLevel > MIC_TALK_LEVEL) lastMicLoudAt = now;
   const state = mood(micLevel, modelLevel, now);
   if (state.mood === "speaking") lastSpokeAt = now;
-  orb.frame(now, state.level, state.mood, isDark());
+  orb.frame(now, state.level, state.mood);
   if (ui.statusLine.textContent !== state.line) ui.statusLine.textContent = state.line;
   ui.caption.dataset.fade = String(!(session && session.responseOpen) && now - lastSpokeAt > CAPTION_FADE_MS);
   requestAnimationFrame(render);
@@ -269,7 +270,7 @@ async function ensurePlayback(rate) {
   playbackNode.connect(playbackContext.destination);
   // A side tap for the orb; it measures exactly what reaches the speaker.
   playbackAnalyser = playbackContext.createAnalyser();
-  playbackAnalyser.fftSize = 1024;
+  playbackAnalyser.fftSize = 2048;
   playbackNode.connect(playbackAnalyser);
   await playbackContext.resume();
 }
@@ -430,7 +431,7 @@ async function startMic() {
     silent.gain.value = 0;
     source.connect(pendingNode).connect(silent).connect(pendingContext.destination);
     const analyser = pendingContext.createAnalyser();
-    analyser.fftSize = 1024;
+    analyser.fftSize = 2048;
     source.connect(analyser);
     await pendingContext.resume();
     if (stale()) throw new Error("the session changed while the microphone was starting");
