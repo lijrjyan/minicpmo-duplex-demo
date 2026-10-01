@@ -1,32 +1,23 @@
 // Protocol state for one native full-duplex realtime session; no DOM, no audio.
 // app.js wires it to the page; the Node tests drive it with a fake socket.
 
-export const INPUT_RATE = 16000;
+// The server grants the input rate in session.updated; this is only the fallback.
+export const DEFAULT_INPUT_RATE = 16000;
 export const PACKET_MS = 80;
-export const PACKET_SAMPLES = (INPUT_RATE * PACKET_MS) / 1000;
 const MAX_UNITS_SHOWN = 200;
 
-// Camera input protocol (vision-input-design-20260926/DESIGN.md section 1). Every
-// wire name the page uses for images lives in this block, so a server-side
-// rename is a one-line change here. The client never asks for images: the
-// server declares them in session.updated and the page follows.
+// Image wire names; the server declares image input in session.updated and the page follows.
 export const IMAGE = {
-  // Camera is on only if session.sglang.granted[GRANTED_FIELD] includes MODALITY.
   GRANTED_FIELD: "input_modalities",
   MODALITY: "image",
-  // session.sglang.granted[FORMAT_FIELD] = {types, max_bytes, max_per_unit}.
   FORMAT_FIELD: "input_image_format",
-  // {type: FRAME_EVENT, event_id, [PAYLOAD_FIELD]: "<base64>", sglang: {[TIME_FIELD]: ms}}; nothing else (strict schema).
   FRAME_EVENT: "sglang.input_image.append",
   PAYLOAD_FIELD: "image",
   TIME_FIELD: "t_ms",
-  // Ack {type: ACK_EVENT, unit_id, event_id}; rejections are non-fatal error events whose
-  // error.event_id is the frame's (invalid_state, buffer_overflow, not_supported).
   ACK_EVENT: "sglang.input_image.accepted",
 };
-// Used for any field the grant leaves out. Short side 448 px: the model rescales
-// to about 448x448 area, so a smaller frame would only be upscaled.
-export const IMAGE_DEFAULTS = { types: ["image/jpeg"], max_bytes: 512 * 1024, max_per_unit: 1, max_short_side: 448 };
+// The model rescales frames to about 448x448, so a smaller short side would only be upscaled.
+export const IMAGE_DEFAULTS = { types: ["image/jpeg"], max_bytes: 512 * 1024, max_frames_per_unit: 1, max_short_side: 448 };
 
 export function bytesToBase64(bytes) {
   let binary = "";
@@ -46,11 +37,13 @@ export function base64ToBytes(encoded) {
 
 export class DuplexSession {
   // transport(event) sends one JSON-serialisable client event; now() returns ms.
-  constructor({ transport, now, outputModalities = ["audio"], instructions = "", listeners = {} }) {
+  // extension is sent as session.sglang (sampling, reference_audio, max_slice_nums, ...).
+  constructor({ transport, now, outputModalities = ["audio"], instructions = "", extension = null, listeners = {} }) {
     this.transport = transport;
     this.now = now;
     this.outputModalities = outputModalities;
     this.instructions = instructions;
+    this.extension = extension;
     this.listeners = listeners;
     this.state = "connecting";
     this.sessionId = null;
@@ -88,7 +81,7 @@ export class DuplexSession {
 
   // Media clock (ms) of the newest input sample: the clock of t_start_ms.
   get inputClockMs() {
-    return ((this.sentSamples + this.pending.length) * 1000) / INPUT_RATE;
+    return ((this.sentSamples + this.pending.length) * 1000) / this.inputRate;
   }
 
   get frameStats() {
@@ -103,6 +96,16 @@ export class DuplexSession {
 
   get unitMs() {
     return this.granted ? this.granted.native_unit_ms : null;
+  }
+
+  // Input PCM rate the server granted; the microphone is resampled to it.
+  get inputRate() {
+    const format = this.granted && this.granted.input_audio_format;
+    return format && format.rate ? format.rate : DEFAULT_INPUT_RATE;
+  }
+
+  get packetSamples() {
+    return Math.round((this.inputRate * PACKET_MS) / 1000);
   }
 
   get outputRate() {
@@ -136,9 +139,10 @@ export class DuplexSession {
     merged.set(samples, this.pending.length);
     let offset = 0;
     let sent = 0;
-    while (merged.length - offset >= PACKET_SAMPLES) {
-      this.queuePacket(merged.slice(offset, offset + PACKET_SAMPLES));
-      offset += PACKET_SAMPLES;
+    const size = this.packetSamples;
+    while (merged.length - offset >= size) {
+      this.queuePacket(merged.slice(offset, offset + size));
+      offset += size;
       sent += 1;
     }
     this.pending = merged.slice(offset);
@@ -219,7 +223,7 @@ export class DuplexSession {
 
   queuePacket(pcm) {
     const seq = this.nextSeq++;
-    const tStartMs = (this.sentSamples * 1000) / INPUT_RATE;
+    const tStartMs = (this.sentSamples * 1000) / this.inputRate;
     this.sentSamples += pcm.length;
     this.packets.push({ seq, tStartMs, samples: pcm.length, pcm, sendMs: null, eventId: null, acked: false });
   }
@@ -279,14 +283,18 @@ export class DuplexSession {
         this.state = "negotiating";
         const session = { output_modalities: this.outputModalities };
         if (this.instructions) session.instructions = this.instructions;
+        if (this.extension && Object.keys(this.extension).length) session.sglang = this.extension;
         this.send("session.update", { session });
         break;
       }
       case "session.updated": {
         this.granted = event.session.sglang.granted;
+        for (const rejection of this.granted.rejections || []) {
+          this.emit("warning", `setting ${rejection.field} not applied: ${rejection.reason}`);
+        }
         const inputRate = this.granted.input_audio_format && this.granted.input_audio_format.rate;
-        if (inputRate !== INPUT_RATE) {
-          this.fail(`server granted ${inputRate} Hz input; this page sends ${INPUT_RATE} Hz`);
+        if (!(inputRate > 0)) {
+          this.fail(`server granted no usable input rate (${inputRate})`);
           break;
         }
         if (this.state === "negotiating") this.state = "ready";

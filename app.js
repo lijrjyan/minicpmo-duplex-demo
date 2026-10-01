@@ -1,10 +1,8 @@
-// Public voice page for a native full-duplex /v1/realtime session behind the demo gate.
-// Protocol handling lives in session.js, audio I/O in worklet.js and camera capture
-// in camera.js (all shared byte-for-byte with tools/realtime_web_demo); orb.js draws
-// the orb from the live microphone and playback levels.
-import { DuplexSession, INPUT_RATE, PACKET_SAMPLES } from "./session.js";
+// Voice page for a native full-duplex /v1/realtime session, proxied by playground/realtime/app.py.
+import { DuplexSession } from "./session.js";
 import { Camera } from "./camera.js";
 import { Orb } from "./orb.js";
+import { Settings } from "./settings.js";
 
 const JITTER_MS = 300;
 const STATUS_POLL_MS = 5000;
@@ -15,11 +13,16 @@ const LEVEL_GAIN = 5;
 const MIC_TALK_LEVEL = 0.12;
 const MODEL_TALK_LEVEL = 0.04;
 const CAPTION_FADE_MS = 5000;
+// Output quieter than this counts as silence when deciding to end a local interrupt.
+const QUIET_RMS = 0.01;
+const UNMUTE_QUIET_MS = 400;
+// The stop button is offered while the model has been audible this recently.
+const INTERRUPT_WINDOW_MS = 1500;
 // Speech has gaps between syllables; a mood holds this long after the last loud frame.
 const MODEL_HOLD_MS = 700;
 const MIC_HOLD_MS = 400;
 
-const ids = ["statusPill", "statusText", "transcriptBtn", "themeBtn", "warning", "selfView", "cameraPreview", "frameCount", "orb", "orbCanvas", "statusLine", "caption", "note", "startBtn", "dock", "cameraBtn", "muteBtn", "micOn", "micOff", "interruptBtn", "endBtn", "hint", "sheet", "sheetClose", "transcript"];
+const ids = ["brandName", "statusPill", "statusText", "transcriptBtn", "themeBtn", "warning", "selfView", "cameraPreview", "frameCount", "orb", "orbCanvas", "statusLine", "caption", "note", "startBtn", "dock", "cameraBtn", "cameraOn", "cameraOff", "muteBtn", "micOn", "micOff", "interruptBtn", "endBtn", "hint", "sheet", "sheetClose", "transcript", "settingsBtn", "settingsPanel", "settingsClose", "settingsForm", "settingsLocked", "presetRow", "setPreset", "setPrompt", "voiceRow", "setVoice", "voicePreview", "voiceInfo", "voiceFile", "outputRow", "setOutput", "setMic", "advanced", "greedyRow", "setGreedy", "samplingFields", "sliceRow", "setSlices", "settingsReset"];
 const ui = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
 
 function wsUrl() {
@@ -54,6 +57,10 @@ let serverUp = null;
 let sessionStart = null;
 let muted = false;
 let mutedResponse = false;
+// Quiet output heard since a local interrupt; enough of it ends the mute.
+let mutedQuietMs = 0;
+// A response is open but has not produced audio yet.
+let awaitingAudio = false;
 let lastSpokeAt = 0;
 let lastModelLoudAt = -Infinity;
 let lastMicLoudAt = -Infinity;
@@ -64,7 +71,17 @@ const OFFER_CAMERA = window.DEMO_CAMERA !== false;
 const camera = new Camera(ui.cameraPreview);
 let startingCamera = false;
 const orb = new Orb(ui.orbCanvas);
+// /v1/realtime/capabilities next to the WebSocket endpoint, unless config.js names it.
+const capabilitiesUrl = window.DEMO_CAPABILITIES_URL || (window.DEMO_WS_URL || "").replace(/^ws/, "http").replace(/\/v1\/realtime.*$/, "/v1/realtime/capabilities");
+const settings = new Settings(ui, { capabilitiesUrl, defaultInstructions: window.DEMO_INSTRUCTIONS || "" });
 const darkQuery = matchMedia("(prefers-color-scheme: dark)");
+
+// Deployment-specific text comes from config.js, so one page serves any duplex model.
+if (window.DEMO_MODEL_NAME) {
+  ui.brandName.textContent = window.DEMO_MODEL_NAME;
+  document.title = `${window.DEMO_MODEL_NAME} Live`;
+}
+if (window.DEMO_NOTE) ui.note.textContent = window.DEMO_NOTE;
 
 function isOpen() {
   return Boolean(socket) && socket.readyState === WebSocket.OPEN;
@@ -98,7 +115,6 @@ function setButtons() {
   ui.caption.hidden = !call;
   ui.startBtn.disabled = remoteBusy || serverUp === false;
   ui.orb.setAttribute("aria-label", call ? "Show transcript" : "Start conversation");
-  ui.interruptBtn.disabled = !(session && session.responseOpen) || mutedResponse;
   ui.muteBtn.disabled = !captureStream;
   ui.muteBtn.setAttribute("aria-pressed", String(muted));
   ui.muteBtn.setAttribute("aria-label", muted ? "Unmute microphone" : "Mute microphone");
@@ -110,7 +126,11 @@ function setButtons() {
   ui.cameraBtn.disabled = startingCamera;
   ui.cameraBtn.setAttribute("aria-pressed", String(camera.active));
   ui.cameraBtn.setAttribute("aria-label", camera.active ? "Turn camera off" : "Turn camera on");
+  ui.cameraBtn.title = camera.active ? "Turn camera off" : "Turn camera on";
+  ui.cameraOn.hidden = !camera.active;
+  ui.cameraOff.hidden = camera.active;
   ui.selfView.hidden = !camera.active;
+  settings.lock(call);
 }
 
 // Level (0..1) from an analyser's current time-domain window.
@@ -138,7 +158,7 @@ function mood(micLevel, modelLevel, now) {
   if (muted) return { mood: "idle", level: 0, line: "Microphone muted" };
   if (!captureStream) return { mood: "idle", level: 0, line: startingMic ? "Allow the microphone to start" : "Microphone off" };
   if (now - lastMicLoudAt < MIC_HOLD_MS) return { mood: "user", level: micLevel, line: "Listening" };
-  if (session.responseOpen) return { mood: "thinking", level: 0, line: "Thinking…" };
+  if (session.responseOpen && awaitingAudio) return { mood: "thinking", level: 0, line: "Thinking…" };
   return { mood: "listening", level: micLevel, line: "Listening" };
 }
 
@@ -156,6 +176,7 @@ function render(now) {
 }
 
 function tick() {
+  ui.interruptBtn.disabled = mutedResponse || !isOpen() || performance.now() - lastModelLoudAt > INTERRUPT_WINDOW_MS;
   let label;
   let pill;
   if (isOpen() && sessionStart !== null) {
@@ -202,6 +223,8 @@ async function pollStatus() {
 function renderTranscript() {
   const text = session ? session.transcript : "";
   const paragraphs = text.split("\n").filter((line) => line.trim());
+  // Audio-only models never send text; the transcript control appears with the first words.
+  ui.transcriptBtn.hidden = !paragraphs.length;
   if (!paragraphs.length) {
     ui.transcript.innerHTML = '<p class="empty">What the model says will appear here.</p>';
     ui.caption.textContent = "";
@@ -275,6 +298,23 @@ async function ensurePlayback(rate) {
   await playbackContext.resume();
 }
 
+function rmsOf(samples) {
+  let energy = 0;
+  for (let index = 0; index < samples.length; index += 1) energy += samples[index] * samples[index];
+  return samples.length ? Math.sqrt(energy / samples.length) : 0;
+}
+
+// Sub-second streaming units stall on every network hiccup, so they get a deeper adaptive jitter buffer.
+const STREAMING_UNIT_MS = 500;
+const STREAMING_PLAYBACK = { jitterMs: 400, maxJitterMs: 900, maxMs: 3500, keepMs: 2200, catchUp: { slow: 0.5, fast: 1.0, skip: 2.0, slowRate: 1.06, fastRate: 1.12 } };
+
+function configurePlayback(unitMs) {
+  if (!playbackNode || !(unitMs > 0) || unitMs >= STREAMING_UNIT_MS) return;
+  const samples = (ms) => Math.round((playbackContext.sampleRate * ms) / 1000);
+  const { jitterMs, maxJitterMs, maxMs, keepMs, catchUp } = STREAMING_PLAYBACK;
+  playbackNode.port.postMessage({ type: "config", initialSamples: samples(jitterMs), maxJitterSamples: samples(maxJitterMs), maxSamples: samples(maxMs), keepSamples: samples(keepMs), catchUp });
+}
+
 function pcm16ToFloat(bytes, sourceRate, targetRate) {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const source = new Float32Array(bytes.byteLength >> 1);
@@ -302,20 +342,28 @@ function sessionListeners() {
     granted: async () => {
       sessionStart = performance.now();
       await ensurePlayback(session.outputRate);
+      configurePlayback(session.unitMs);
       setButtons();
       // One tap starts everything: the microphone follows the grant.
       startMic().catch((error) => warn(`Microphone: ${error.message}`, true));
     },
     audio: (bytes) => {
       if (!playbackNode) return;
-      // After a local interrupt, drop the rest of that answer; the next
-      // response.created lifts the mute.
-      if (mutedResponse) return;
+      awaitingAudio = false;
       const samples = pcm16ToFloat(bytes, session.outputRate, playbackContext.sampleRate);
+      // After a local interrupt, drop what the model is still saying. Models that
+      // answer in turns lift the mute at the next response.created; models that
+      // stream one response for the whole session lift it once they fall quiet.
+      if (mutedResponse) {
+        mutedQuietMs = rmsOf(samples) < QUIET_RMS ? mutedQuietMs + (samples.length * 1000) / playbackContext.sampleRate : 0;
+        if (mutedQuietMs < UNMUTE_QUIET_MS) return;
+        mutedResponse = false;
+      }
       playbackNode.port.postMessage({ type: "push", samples }, [samples.buffer]);
     },
     response: ({ open }) => {
       if (open) mutedResponse = false;
+      awaitingAudio = open;
       setButtons();
       if (playbackNode) playbackNode.port.postMessage({ type: open ? "open" : "flush" });
       // A new answer means whatever is still queued belongs to the previous one.
@@ -354,11 +402,13 @@ async function connect() {
     await ensurePlayback(playbackRate);
     activeSocket = new WebSocket(wsUrl());
     socket = activeSocket;
+    const options = settings.sessionOptions();
     const activeSession = new DuplexSession({
       transport: (event) => activeSocket.send(JSON.stringify(event)),
       now: () => performance.now(),
-      outputModalities: ["audio"],
-      instructions: window.DEMO_INSTRUCTIONS || "",
+      outputModalities: options.outputModalities,
+      instructions: options.instructions,
+      extension: options.extension,
       listeners: sessionListeners(),
     });
     session = activeSession;
@@ -418,14 +468,16 @@ async function startMic() {
   let pendingContext = null;
   const stale = () => generation !== micGeneration || socket !== activeSocket || !isReady();
   try {
-    pendingStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
+    pendingStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true, ...settings.micConstraint() }, video: false });
+    // Device names are only visible once the microphone permission is granted.
+    settings.refreshDevices().catch(() => {});
     if (stale()) throw new Error("the session changed while the microphone permission was pending");
     pendingContext = new AudioContext({ latencyHint: "interactive" });
     await pendingContext.audioWorklet.addModule("worklet.js");
     if (stale()) throw new Error("the session changed while the microphone was starting");
     const source = pendingContext.createMediaStreamSource(pendingStream);
     const pendingNode = new AudioWorkletNode(pendingContext, "capture-processor", {
-      processorOptions: { sourceRate: pendingContext.sampleRate, targetRate: INPUT_RATE, frameSamples: PACKET_SAMPLES },
+      processorOptions: { sourceRate: pendingContext.sampleRate, targetRate: session.inputRate, frameSamples: session.packetSamples },
     });
     const silent = pendingContext.createGain();
     silent.gain.value = 0;
@@ -477,6 +529,7 @@ async function closeNow() {
 
 function interrupt() {
   mutedResponse = true;
+  mutedQuietMs = 0;
   if (playbackNode) playbackNode.port.postMessage({ type: "clear" });
   setButtons();
 }
@@ -484,7 +537,7 @@ function interrupt() {
 const start = () => connect().catch((error) => warn(error.message, true));
 ui.startBtn.addEventListener("click", start);
 ui.orb.addEventListener("click", () => {
-  if (inCall()) setSheet(ui.sheet.dataset.open !== "true");
+  if (inCall()) setSheet(!ui.transcriptBtn.hidden && ui.sheet.dataset.open !== "true");
   else if (!ui.startBtn.disabled) start();
 });
 ui.muteBtn.addEventListener("click", () => {
@@ -501,8 +554,18 @@ ui.themeBtn.addEventListener("click", () => {
   document.documentElement.dataset.theme = next;
   try { localStorage.setItem("theme", next); } catch {}
 });
+function setPanel(open) {
+  ui.settingsPanel.dataset.open = String(open);
+  ui.settingsBtn.setAttribute("aria-expanded", String(open));
+  if (open) setSheet(false);
+}
+ui.settingsBtn.addEventListener("click", () => setPanel(ui.settingsPanel.dataset.open !== "true"));
+ui.settingsClose.addEventListener("click", () => setPanel(false));
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") setSheet(false);
+  if (event.key === "Escape") {
+    setSheet(false);
+    setPanel(false);
+  }
 });
 try {
   const saved = localStorage.getItem("theme");
@@ -515,3 +578,4 @@ pollStatus();
 setButtons();
 tick();
 requestAnimationFrame(render);
+settings.init().catch((error) => warn(`Settings: ${error.message}`));
